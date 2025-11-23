@@ -545,7 +545,7 @@ async def main() -> None:
     print("=" * 80)
 
     # Test with empty query to match original behavior (uses LLM-driven token selection)
-    result = await demo.run("")
+    result = await demo.run("What token shows the most potential for a 10% gain in the next 24 hours?")
     demo.render(result)
 
 
