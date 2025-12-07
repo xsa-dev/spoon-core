@@ -156,6 +156,25 @@ class GeminiProvider(LLMProviderInterface):
                 ))
         
         return system_content, gemini_messages
+
+    def _sanitize_gemini_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove fields that are not supported by Gemini function declarations."""
+        if not isinstance(schema, dict):
+            return schema
+
+        clean_schema = schema.copy()
+        # Remove fields that Gemini API doesn't support
+        for key in ["additionalProperties", "additional_properties", "title", "$schema"]:
+            clean_schema.pop(key, None)
+
+        if "properties" in clean_schema and isinstance(clean_schema["properties"], dict):
+            clean_schema["properties"] = {
+                name: self._sanitize_gemini_schema(value) for name, value in clean_schema["properties"].items()
+            }
+        if "items" in clean_schema:
+            clean_schema["items"] = self._sanitize_gemini_schema(clean_schema["items"])
+
+        return clean_schema
     
     def _convert_tools_to_gemini(self, tools: List[Dict]) -> List:
         """Convert OpenAI/Anthropic tool format to Gemini format."""
@@ -166,10 +185,11 @@ class GeminiProvider(LLMProviderInterface):
             for tool in tools:
                 if 'function' in tool:
                     func = tool['function']
+                    parameters = self._sanitize_gemini_schema(func.get('parameters', {}))
                     function_declarations.append(types.FunctionDeclaration(
                         name=func.get('name'),
                         description=func.get('description'),
-                        parameters=func.get('parameters', {})
+                        parameters=parameters
                     ))
             
             if function_declarations:
@@ -291,12 +311,14 @@ class GeminiProvider(LLMProviderInterface):
             usage_data = None
             
             # Send streaming request
+            # Filter out parameters that generate_content_stream doesn't accept
+            filtered_kwargs = {k: v for k, v in kwargs.items() 
+                               if k not in ['model', 'max_tokens', 'temperature', 'callbacks', 'timeout']}
             stream = self.client.models.generate_content_stream(
                 model=model,
                 contents=contents,
                 config=generate_config,
-                **{k: v for k, v in kwargs.items() 
-                   if k not in ['model', 'max_tokens', 'temperature', 'callbacks']}
+                **filtered_kwargs
             )
             
             for part_response in stream:
@@ -343,15 +365,18 @@ class GeminiProvider(LLMProviderInterface):
                         yield response_chunk
             
             # Trigger on_llm_end callback
+            final_response = LLMResponse(
+                content=full_content,
+                provider="gemini",
+                model=model,
+                finish_reason=finish_reason or "stop",
+                native_finish_reason=finish_reason or "stop",
+                tool_calls=[],
+                usage=usage_data,
+                metadata={}
+            )
             await callback_manager.on_llm_end(
-                response=LLMResponseChunk(
-                    content=full_content,
-                    provider="gemini",
-                    model=model,
-                    finish_reason=finish_reason,
-                    tool_calls=[],
-                    usage=usage_data
-                ),
+                response=final_response,
                 run_id=run_id
             )
                             
@@ -476,8 +501,12 @@ class GeminiProvider(LLMProviderInterface):
                         except Exception as e:
                             logger.error(f"Failed to save image: {str(e)}")
         
-        # If no content was obtained from candidates, try using the text attribute
-        if not content and hasattr(response, "text"):
+        # If no content was obtained and there were no candidates, fall back to response.text
+        if (
+            not content
+            and (not hasattr(response, "candidates") or not response.candidates)
+            and hasattr(response, "text")
+        ):
             response_text = response.text
             content = response_text
         
@@ -541,8 +570,12 @@ class GeminiProvider(LLMProviderInterface):
                         tool_calls.append(tool_call)
                         finish_reason = "tool_calls"
         
-        # If no content was obtained from candidates, try using the text attribute
-        if not content and hasattr(response, "text"):
+        # If no content was obtained and there were no candidates, fall back to response.text
+        if (
+            not content
+            and (not hasattr(response, "candidates") or not response.candidates)
+            and hasattr(response, "text")
+        ):
             content = response.text
         
         return LLMResponse(
